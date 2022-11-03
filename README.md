@@ -1,6 +1,6 @@
 # BULK_RNA-Seq_MSLesion
 
-Bulk analysis of MS lesions(Supervised)
+Bulk analysis of MS lesions(Supervised & Unsupervised)
 
 This is an analysis performed on the bulk RNA-Seq dataset
 

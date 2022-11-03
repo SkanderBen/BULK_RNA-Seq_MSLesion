@@ -1,0 +1,665 @@
+---
+title: "Bulk analysis of MS lesions(Unsupervised)"
+output: github_document
+always_allow_html: yes
+---
+
+This is an analysis performed on the bulk RNA-Seq dataset
+
+```{r  echo=TRUE, message=FALSE, warning=FALSE}
+library(edgeR)
+library(fgsea)
+library(qusage)
+library(DESeq2)
+library(org.Hs.eg.db) 
+library(ggplot2)
+library(enrichR)
+library(VennDiagram)
+library(ggpubr)
+library(ggrepel)
+library(PCAtools)
+library(RColorBrewer)
+library(ggiraph)
+library(UpSetR)
+library(rhandsontable)
+library(nloptr)
+library(ggVennDiagram)
+library(BiocManager)
+library(stringr)
+library(knitr)
+library(ggfortify)
+```
+
+### Counts list
+```{r echo=TRUE, message=FALSE, warning=FALSE, results='asis'}
+dat = read.csv('/Users/skander/Library/CloudStorage/OneDrive-Personnel/Documents/UDEM/Master/BulkData/data/bulkExtra/Totalbulk/merged_counts.csv',sep=';', header = TRUE, row.names=1)
+knitr::kable(dat[1:12, 1:12], caption ="A Knitr kable")
+```
+
+### Meta data
+```{r echo=TRUE, message=FALSE, warning=FALSE, results='asis'}
+meta = read.csv('/Users/skander/Library/CloudStorage/OneDrive-Personnel/Documents/UDEM/Master/BulkData/data/bulkExtra/Totalbulk/meta_data_3batch.csv', header = T,sep = ';', row.names = 1)
+names(meta)[names(meta) == "type"] <- "lesion_type"
+meta$sex = 'M'
+meta[which(meta$sample=="AB203"),]$sex = 'F'
+meta[which(meta$sample=="AB253"),]$sex = 'F'
+
+meta$disease="MS"
+meta[which(meta$sample %in% c("AB257","AB251","AB252")),]$disease="HC"
+#meta$region="WM"
+meta$group=paste(meta$disease,meta$tissue,sep=".")
+meta$reads=colSums(dat[-1])[rownames(meta)]
+
+meta$condition = 'Normal'
+meta[which(meta$lesion_type %in% c("WML","CL","PVML")),'condition']="Lesion"
+meta[grepl('^NA',meta$lesion_type),'condition']='Normal_Appearing'
+
+knitr::kable(meta, caption ="A Knitr kable")
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, paged.print=TRUE}
+go = read.gmt('/Users/skander/Library/CloudStorage/OneDrive-Personnel/Documents/UDEM/Master/BulkData/GO/c5.go.bp.v7.5.1.symbols.gmt')
+mf = read.gmt('/Users/skander/Library/CloudStorage/OneDrive-Personnel/Documents/UDEM/Master/BulkData/GO/c5.go.mf.v7.5.1.symbols.gmt')
+kegg = read.gmt('/Users/skander/Library/CloudStorage/OneDrive-Personnel/Documents/UDEM/Master/BulkData/GO/c2.cp.kegg.v7.5.1.symbols.gmt')
+tft = read.gmt('/Users/skander/Library/CloudStorage/OneDrive-Personnel/Documents/UDEM/Master/BulkData/GO/c3.tft.v7.5.1.symbols.gmt')
+
+sign_cols=c(DN='deepskyblue',NS='grey80',UP='tomato')
+
+plot.gene <- function(x){
+  gene_id = rownames(subset(resA,gene_name==x))[1]
+  meta$gene = y$E[gene_id,rownames(meta)]
+  ggplot(meta,aes(lesion_type,gene))+geom_boxplot()+geom_point(aes(col=batch))+theme_bw()+ ggtitle(x)
+}
+
+fisher_enrichment<-function(cluster_markers,pathway,universe,pathway_name){
+enrichment_tables=list() 
+  for(cluster in 1:length(cluster_markers)){
+    cluster_name=names(cluster_markers)[cluster]
+    output <- lapply(pathway, function(x) {
+    Freq.table <- table(factor(universe %in% as.character(cluster_markers[[cluster]]), 
+                          levels = c(TRUE,FALSE)), 
+                    	  factor(universe %in% x, 
+                          levels = c(TRUE,FALSE)))
+
+      fit <- fisher.test(Freq.table, alternative = "greater")
+      interSection <- intersect(cluster_markers[[cluster]], x)
+      interSection <- paste(interSection, collapse = ",")
+      return(value = c(NOM_pval = fit$p.value, INTERSECT = interSection,"OR"=fit$estimate))})
+    
+    term_names=character()
+    for (pathway.term in 1:length(output)){
+      term_names[pathway.term]=pathway[[pathway.term]][1]
+    }
+  
+    results=data.frame(do.call("rbind",output))
+    results$fdr=p.adjust(as.numeric(as.character(results$NOM_pval)),method = "BH")
+    results=results[order(results$fdr),]
+    enrichment_tables[[cluster_name]]=results
+  }
+
+  return(enrichment_tables)
+}
+
+find_enrichments<-function(resA,n=5,show='both'){
+  resA.t = resA$t
+  names(resA.t)=resA$gene_name 
+  if(show=='up'){
+    resA.bp = subset(fgsea(go,resA.t),NES>0)
+    resA.mf = subset(fgsea(mf,resA.t),NES>0)
+    resA.kegg= subset(fgsea(kegg,resA.t),NES>0)
+    resA.tft= subset(fgsea(tft,resA.t),NES>0)
+  }else if(show=='down'){
+    resA.bp = subset(fgsea(go,resA.t),NES<0)
+    resA.mf = subset(fgsea(mf,resA.t),NES<0)
+    resA.kegg= subset(fgsea(kegg,resA.t),NES<0)   
+    resA.tft= subset(fgsea(tft,resA.t),NES<0)
+    
+  }else{
+    resA.bp = fgsea(go,resA.t)
+    resA.mf = fgsea(mf,resA.t)
+    resA.kegg= fgsea(kegg,resA.t)   
+    resA.tft= subset(fgsea(tft,resA.t))
+  }
+  
+  resA.bp$GO = 'BP'
+  resA.mf$GO = 'MF'
+  resA.kegg$GO = 'KEGG'
+  out=list(enr=list(bp=resA.bp,mf=resA.mf,kegg=resA.kegg,tft=resA.tft))
+  
+  enr = rbind(
+    head(resA.bp[order(resA.bp$padj),],n),
+    head(resA.mf[order(resA.mf$padj),],n),
+    head(resA.kegg[order(resA.kegg$padj),],n)
+  )
+  enr=data.frame(enr)
+  enr$pathway=gsub('_',' ',gsub('GO_|KEGG_','',enr$pathway))
+  enr$pathway=factor(enr$pathway,levels=as.character(enr[order(enr$GO,enr$NES),'pathway']))
+  p=ggplot(enr,aes(pathway,NES,fill=GO))+geom_col(width=.6,alpha=.6)+geom_col(width=.6,fill=NA,aes(col=GO))+coord_flip()+theme_bw()+geom_vline(xintercept=c(n,n*2)+.5,linetype='dashed')+geom_hline(yintercept=0)
+  out$plot=p
+  return(out)
+}
+
+##top pathway
+topPath<- function(fish ,specific, p ,n){
+  l=n*20
+  result <- matrix(NA, l, l)
+  
+  colnames(result) <- rownames(result) <- rownames(getElement(fish, specific))[1:l]
+  for(i in 1:l){
+    for(j in 1:l){
+      minlist = 0
+      if(length(unlist(strsplit(fish[[specific]][["INTERSECT"]][i], split = ",")))>=length(unlist(strsplit(fish[[specific]][["INTERSECT"]][j], split = ",")))) minlist=length(unlist(strsplit(fish[[specific]][["INTERSECT"]][j], split = ","))) 
+      else minlist=length(unlist(strsplit(fish[[specific]][["INTERSECT"]][i], split = ",")))
+      result[i, j] <- length(intersect(unlist(strsplit(fish[[specific]][["INTERSECT"]][i], split = ",")), unlist(strsplit(fish[[specific]][["INTERSECT"]][j], split = ","))))/(minlist)      
+      result[j, i] <- result[i, j]     
+    }
+  }
+  listBPspecific = list(c(rownames(result)[1]))
+  i=1
+  while(i < l){
+    j=i
+    while(j < l){
+      if(result[i, j] < p){ 
+        i=j
+        listBPspecific <- c(listBPspecific, rownames(result)[j])
+        j=l
+      }else {
+        j=j+1
+      }
+    }
+    if(length(listBPspecific)>n-1) 
+      i=l
+  }
+  return(listBPspecific)
+}
+```
+
+
+# ALL batchs
+```{r  echo=TRUE, message=FALSE, warning=FALSE, paged.print=TRUE, fig.width = 4, fig.height = 3}
+d0 <- DGEList(dat[-1])
+d0 <- calcNormFactors(d0)
+cutoff <- 5
+drop <- which(apply(cpm(d0), 1, max) < cutoff)
+d <- d0[-drop,]
+
+mm <- model.matrix(~ 0 + lesion_type+batch+sample+sex, data=meta[colnames(d),])
+
+# Without filtering low expressed genes
+y <- voom(d0[,rownames(meta)], mm, plot = T)
+
+# Filtering low expressed genes
+y <- voom(d[,rownames(meta)], mm, plot = T)
+
+##gene name reference(ref_G)
+conv_B=AnnotationDbi::select(org.Hs.eg.db,keys=rownames(y$E),keytype='ENSEMBL',columns=c('GENENAME','SYMBOL'))
+ref_G=conv_B[!duplicated(conv_B[,1]),]
+rownames(ref_G)=ref_G[,1]
+##
+```
+
+
+## PCA All DATA {.tabset}
+Perform a *PCA* on the normalized samples and identify main factors of variation. 
+
+### Data including batch effect
+```{r  echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE, fig.width = 4, fig.height = 3}
+BD<-pca(y$E, metadata = meta)
+BD <- biplot(BD, colby = 'batch',hline = 0, vline = 0,legendPosition = 'right', lab="",title = "Data including batch effect")
+BD
+BDCorr <- removeBatchEffect(y$E,batch = meta$batch)
+```
+
+### Batch effect removed from data
+```{r  echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE, fig.width = 4, fig.height = 3}
+BDCorr <- removeBatchEffect(y$E,batch = meta$batch)
+BD1 <- pca(BDCorr, metadata = meta)
+BDb <- biplot(BD1, colby = 'batch',hline = 0, vline = 0,legendPosition = 'right', lab="",title="Batch effect removed from data")
+BDb
+```
+
+### Effect of samples on data (sex, type of ms,...) (col by Sample)
+```{r  echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE, fig.width = 4, fig.height = 3}
+BDsample <- biplot(BD1, colby = 'sample',hline = 0, vline = 0,legendPosition = 'right', lab="",title="Effect of samples on data (sex, type of ms,...)")
+BDsample
+```
+
+### Effect of samples on data (sex, type of ms,...) (col by Sex)
+```{r  echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE, fig.width = 4, fig.height = 3}
+BDsex <- biplot(BD1, colby = 'sex',hline = 0, vline = 0,legendPosition = 'right', lab="",title="Effect of samples on data (sex, type of ms,...)")
+BDsex
+```
+
+### Batch+Patient effect removed from data (col by Sex)
+```{r  echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE, fig.width = 4, fig.height = 3}
+BDCorrBS <- removeBatchEffect(y$E,batch = meta$batch, batch2 = meta$sample)
+BD2 <- pca(BDCorrBS, metadata = meta)
+BDsexCorr <- biplot(BD2, colby = 'sex',hline = 0, vline = 0,legendPosition = 'right', lab="",title="Batch+Patient effect removed from data")
+BDsexCorr
+```
+
+### Batch+Patient effect removed from data (col by Sample)
+```{r  echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE, fig.width = 4, fig.height = 3}
+BDsampleCorr <- biplot(BD2, colby = 'sample',hline = 0, vline = 0,legendPosition = 'right', lab="",title="Batch+Patient effect removed from data")
+BDsampleCorr
+
+pc=prcomp(t(BDCorrBS))
+autoplot(pc)
+meta$pc1=pc$x[rownames(meta),1]
+meta$pc2=pc$x[rownames(meta),2]
+ggplot(meta,aes(pc1,pc2))+
+  geom_point(aes(col=tissue))+
+  geom_point(data=subset(meta,grepl("^Active",typeL)),col="black",shape="*",size=3)+
+  geom_point(data=subset(meta,grepl("^Early",typeL)),col="red",shape="*",size=3)
+
+
+```
+
+### Batch+Patient effect removed from data (col by Lesion type and Sex)
+```{r  echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE, fig.width = 4, fig.height = 3}
+BDg <- biplot(BD2, colby = 'lesion_type',shape = 'sex',hline = 0, vline = 0,legendPosition = 'right', lab="",title="PCA")
+BDg
+```
+
+## Clustering
+```{r  echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE, fig.width = 5, fig.height = 4}
+hc=hclust(dist(t(BDCorrBS)), method='ward.D2')
+hc_clus=data.frame(cutree(hc, k=2))
+hc_clus[,1]=paste0('C',hc_clus[,1])
+meta$clus_hm=hc_clus[rownames(meta),1]
+t=data.frame(table(meta$clus_hm))
+
+plot(hc)
+ggplot(t,aes(Var1,Freq))+geom_col(fill=c('darkolivegreen3','brown3'))+theme_bw()
+autoplot(prcomp(t(BDCorrBS)),data=meta, col='clus_hm')+theme_bw()
+```
+
+```{r  echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE, fig.width = 6, fig.height = 4}
+summarize_col<-function(col){
+  t=table(meta[,c('clus_hm' ,col)])
+  for(i in 1:ncol(t)){t[,i]=t[,i]/sum(t[,i])}
+  for(i in 1:nrow(t)){t[i, ]=t[i,]/sum(t[i,])}
+  t=data.frame(t)
+  p=ggplot(t,aes(clus_hm,Freq,fill=t[,col]))+geom_col(col='white')+labs(fill=col)+theme_bw()
+return(p)
+}
+
+p1=summarize_col('sample')
+p2=summarize_col('sex')+scale_fill_manual(values=c('deeppink','deepskyblue'))
+p3=summarize_col('disease')
+p4=summarize_col('batch')+scale_fill_manual(values=c('grey30','grey60','grey90'))
+p5=summarize_col('condition')+scale_fill_manual(values=c('brown1','darkolivegreen1','darkorange'))
+p6=summarize_col('lesion_type')
+p7=summarize_col('tissue')
+
+cowplot::plot_grid(p1,p2,p3,p4,p5,p6,p7,ncol=3)
+
+```
+
+## Comparisons between cluster
+```{r  echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE, fig.width = 6, fig.height = 3}
+mmG <- model.matrix(~ 0 + clus_hm+batch+sample+sex, data=meta[colnames(d),])
+
+# Filtering low expressed genes
+yG <- voom(d[,rownames(meta)], mmG, plot = F)
+
+fitG <- lmFit(yG, mmG)
+contrG <- makeContrasts(
+  A = clus_hmC1 - clus_hmC2,
+  levels = colnames(coef(fitG)))
+tmpG <- contrasts.fit(fitG, contrG)
+tmpG <- eBayes(tmpG) 
+
+res <- topTable(tmpG, sort.by = "P", n = Inf,coef='A')
+res$gene_id =  rownames(res)
+res$comp = 'clus_hmC1_vs_clus_hmC2'
+res$gene_name = ref_G[rownames(res),3]
+res=res[order(-abs(res$logFC)),]
+res$show = F
+res[1:15,'show']=T
+res$sign = 'NS'
+res[which(res$adj.P.Val<0.05&res$logFC>1),'sign']='UP'
+res[which(res$adj.P.Val<0.05&res$logFC<(-1)),'sign']='DN'
+res$gene_name=ref_G[rownames(res),3]
+
+ggplot(subset(res,-log10(adj.P.Val)<6),aes(logFC,-log10(adj.P.Val),col=sign)) +geom_point_interactive(aes(x=logFC,y=-log10(adj.P.Val),color=sign,tooltip = gene_name,data_id = gene_name))+theme_bw()+scale_color_manual(values=sign_cols)+ geom_label_repel(data=subset(res,show==T),aes(label=gene_name),col='black',size=3,force=30,fill = alpha(c("white"),0.5))+ggtitle('clus_hmC1_vs_clus_hmC2')
+
+```
+
+
+## Gene set enrichment analysis(PCA)
+```{r echo=TRUE, message=FALSE, warning=FALSE, paged.print=TRUE, fig.width = 4, fig.height = 3}
+pca = prcomp(t(BDCorrBS))$x[,1:2]
+pvals=c()
+est=c()
+for(i in 1:nrow(BDCorrBS)){
+  pvals = c(pvals,cor.test(BDCorrBS[i,],pca[,1])$p.value)
+  est = c(est,cor.test(BDCorrBS[i,],pca[,1])$estimate)
+}
+names(pvals)=rownames (BDCorrBS)
+names(pvals)=ref_G[names(pvals),3]
+pvals=pvals[!is.na(names(pvals))]
+
+names(est)=rownames(BDCorrBS)
+names(est)=ref_G[names(est),3]
+est=est[!is.na(names(est))]
+
+df = data.frame(cbind(pvals,est[names(pvals)]))
+df$gene = rownames(df)
+pvals=c()
+est=c()
+for(i in 1:nrow(BDCorrBS)){
+  pvals = c(pvals,cor.test(BDCorrBS[i,],pca[,2])$p.value)
+  est = c(est,cor.test(BDCorrBS[i, ],pca[,2])$estimate)
+}
+names(pvals)=rownames(BDCorrBS)
+names(pvals)=ref_G[names(pvals),3]
+pvals=pvals[!is.na(names(pvals))]
+
+names(est)=rownames(BDCorrBS)
+names(est)=ref_G[names(est),3]
+est=est[!is.na(names(est))]
+
+df2=data.frame(cbind(pvals,est[names(pvals)]))
+
+df$pval_pc2=df2[rownames(df),1]
+df$est_pc2=df2[rownames(df),2]
+
+vec1=df[,2]
+vec2=df[,4]
+
+names(vec1)=rownames(df)
+names(vec2)=rownames(df)
+
+gsea_res1=fgsea(pathways=go,stats=vec1)
+gsea_res2=fgsea(pathways=go,stats=vec2)
+
+head(gsea_res1[order(gsea_res1$padj),],30)
+head(gsea_res2[order(gsea_res2$padj),],30)
+```
+
+
+## Lesion only
+```{r echo=TRUE, message=FALSE, warning=FALSE, paged.print=TRUE, fig.width = 4, fig.height = 3}
+lesions=subset(meta,condition=='Lesion')
+autoplot(prcomp(t(BDCorrBS[,rownames(lesions)])),data=lesions,col='tissue')+theme_bw()
+```
+
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, paged.print=TRUE, fig.width = 6, fig.height = 4}
+lesions$cd3e = BDCorrBS['ENSG00000198851', rownames(lesions)]
+lesions$vcam1 = BDCorrBS['ENSG00000162692', rownames(lesions)]
+lesions$icam1 = BDCorrBS['ENSG00000090339', rownames(lesions)]
+lesions$mcam = BDCorrBS['ENSG00000076706', rownames(lesions)] 
+lesions$ighg2 = BDCorrBS['ENSG00000211893', rownames(lesions)]
+lesions$ms4a1 = BDCorrBS['ENSG00000156738', rownames(lesions)]
+lesions$itga8 = BDCorrBS['ENSG00000077943', rownames(lesions)]
+lesions$irf1 = BDCorrBS['ENSG00000125347', rownames(lesions)] 
+lesions$cd24 = BDCorrBS['ENSG00000272398', rownames(lesions)] 
+lesions$ccl4 = BDCorrBS['ENSG00000275302', rownames(lesions)] 
+
+a1=autoplot(prcomp(t(BDCorrBS[,rownames(lesions)])),data=lesions,fill='vcam1',shape=21)+scale_fill_gradientn(colors=rev(brewer.pal(11,'RdYlBu')))+theme_bw()
+a2=autoplot(prcomp(t(BDCorrBS[,rownames(lesions)])),data=lesions,fill='icam1',shape=21)+scale_fill_gradientn(colors=rev(brewer.pal(11,'RdYlBu')))+theme_bw()
+a3=autoplot(prcomp(t(BDCorrBS[,rownames(lesions)])),data=lesions,fill='mcam',shape=21)+scale_fill_gradientn(colors=rev(brewer.pal(11,'RdYlBu')))+theme_bw()
+a4=autoplot(prcomp(t(BDCorrBS[,rownames(lesions)])),data=lesions,fill='cd3e',shape=21)+scale_fill_gradientn(colors=rev(brewer.pal(11,'RdYlBu')))+theme_bw()
+a5=autoplot(prcomp(t(BDCorrBS[,rownames(lesions)])),data=lesions,fill='ighg2',shape=21)+scale_fill_gradientn(colors=rev(brewer.pal(11,'RdYlBu')))+theme_bw()
+a6=autoplot(prcomp(t(BDCorrBS[,rownames(lesions)])),data=lesions,fill='ms4a1',shape=21)+scale_fill_gradientn(colors=rev(brewer.pal(11,'RdYlBu')))+theme_bw()
+a7=autoplot(prcomp(t(BDCorrBS[,rownames(lesions)])),data=lesions,fill='itga8',shape=21)+scale_fill_gradientn(colors=rev(brewer.pal(11,'RdYlBu')))+theme_bw()
+a8=autoplot(prcomp(t(BDCorrBS[,rownames(lesions)])),data=lesions,fill='irf1',shape=21)+scale_fill_gradientn(colors=rev(brewer.pal(11,'RdYlBu')))+theme_bw()
+#a9=autoplot(prcomp(t(BDCorrBS[,rownames(lesions)])),data=lesions,fill='cd24',shape=21)+scale_fill_gradientn(colors=rev(brewer.pal(11,'RdYlBu')))+theme_bw()
+a9=autoplot(prcomp(t(BDCorrBS[,rownames(lesions)])),data=lesions,fill='ccl4',shape=21)+scale_fill_gradientn(colors=rev(brewer.pal(11,'RdYlBu')))+theme_bw()
+
+cowplot::plot_grid(a1,a2,a3,a4,a5,a6,a7,a8,a9,ncol=3)
+```
+
+
+## Clustering only Lesion
+```{r echo=TRUE, message=FALSE, warning=FALSE, paged.print=TRUE, fig.width = 5, fig.height = 3}
+hc=hclust(dist(t(BDCorrBS[,rownames(lesions)])))
+subtypeLesion=data.frame(cutree(hc, k=2))
+subtypeLesion[,1]=paste0('C',subtypeLesion[,1])
+colnames(subtypeLesion)='subtypeLesion'
+
+meta$clus_hm=subtypeLesion[rownames(meta),1]
+t=data.frame(table(meta$clus_hm))
+
+plot(hc)
+ggplot(t,aes(Var1,Freq))+geom_col(fill=c('darkolivegreen3','brown3'))+theme_bw()
+autoplot(prcomp(t(BDCorrBS[,rownames(lesions)])),data=subtypeLesion,col='subtypeLesion')+theme_bw()
+```
+
+```{r  echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE, fig.width = 6, fig.height = 3}
+summarize_col<-function(col){
+  t=table(lesions[,c('lesion_type' ,col)])
+  for(i in 1:ncol(t)){t[,i]=t[,i]/sum(t[,i])}
+  for(i in 1:nrow(t)){t[i, ]=t[i,]/sum(t[i,])}
+  t=data.frame(t)
+  p=ggplot(t,aes(lesion_type,Freq,fill=t[,col]))+geom_col(col='white')+labs(fill=col)+theme_bw()
+  return(p)
+}
+
+lesions$lesion_type=subtypeLesion[rownames(lesions),1]
+
+p1=summarize_col('sample')
+p2=summarize_col('sex')+scale_fill_manual(values=c('deeppink','deepskyblue'))
+p3=summarize_col('batch')+scale_fill_manual(values=c('grey30','grey60','grey90'))
+p4=summarize_col('tissue')
+
+cowplot::plot_grid(p1,p2,p3,p4,ncol=2)
+
+#subset(lesions,lesion_type=='C2'&tissue=='PV')
+#subset(lesions,lesion_type=='C1'&tissue=='Cortical')
+meta[c('S72','S81d'),]
+
+```
+
+
+```{r  echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE, fig.width = 6, fig.height = 3}
+mmG <- model.matrix(~ 0 + lesion_type+batch, data=lesions)
+
+# Filtering low expressed genes
+yG <- voom(d[,rownames(lesions)], mmG, plot = F)
+
+fitG <- lmFit(yG, mmG)
+contrG <- makeContrasts(
+  A = lesion_typeC1 - lesion_typeC2,
+  levels = colnames(coef(fitG)))
+tmpG <- contrasts.fit(fitG, contrG)
+tmpG <- eBayes(tmpG) 
+
+res <- list()
+res[['C1_vs_C2']] <- topTable(tmpG, sort.by = "P", n = Inf,coef='A')
+
+res=do.call(rbind,res)
+res=res[order(-abs(res$logFC)),]
+res$show = F
+res[1:15,'show']=T
+res$sign = 'NS'
+res[which(res$adj.P.Val<0.01&res$logFC>0.5),'sign']='UP'
+res[which(res$adj.P.Val<0.01&res$logFC<(-0.5)),'sign']='DN'
+res$gene_name=ref_G[gsub(".+\\.","",rownames(res)),3]
+res$comp="C1_vs_C2"
+
+ggplot(res,aes(logFC,-log10(P.Value),col=sign))+geom_point_interactive(aes(x=logFC,y=-log10(P.Value),color=sign,tooltip = gene_name,data_id = gene_name))+theme_bw()+scale_color_manual(values=sign_cols)+ geom_label_repel(data=subset(res,show==T),aes(label=gene_name),col='black',size=3,force=30,fill = alpha(c("white"),0.5))+facet_grid(~comp)
+```
+
+```{r  echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE, fig.width = 6, fig.height = 3}
+meta$subtype = 'NoLesion'
+meta[rownames(lesions),]$subtype = subtypeLesion[,1]
+meta[grepl('^NA' ,meta$lesion_type), 'subtype']="NormalAppear"
+
+autoplot(prcomp(t(BDCorrBS)), data = meta, col ='subtype' ,shape='tissue')+theme_bw()
+autoplot(prcomp(t(BDCorr[,rownames(subset(meta,tissue%in%c('WM')))]),scale=T),data=subset(meta, tissue%in%c('WM')),col='lesion_type')+theme_bw()
+autoplot(prcomp(t(BDCorr[,rownames(subset(meta,tissue%in%c('Cortical')))])),data=subset(meta,tissue%in%c('Cortical')),col='lesion_type' )+theme_bw()
+autoplot(prcomp(t(BDCorr[,rownames(subset(meta,tissue%in%c('PV')))])),data=subset(meta,tissue%in%c('PV')),col='lesion_type')+theme_bw()
+```
+
+
+```{r  echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE, fig.width = 6, fig.height = 3}
+mmG <- model.matrix(~ 0 + subtype+batch, data=meta[colnames(d),])
+
+# Filtering low expressed genes
+yG <- voom(d[,rownames(meta)], mmG, plot = F)
+
+fitG <- lmFit(yG, mmG)
+contrG <- makeContrasts(
+  A = subtypeC1 - subtypeC2,
+  B = subtypeC1 - (subtypeNoLesion+subtypeNormalAppear)/2,
+  C = subtypeC2 - (subtypeNoLesion+subtypeNormalAppear)/2,
+  levels = colnames(coef(fitG)))
+tmpG <- contrasts.fit(fitG, contrG)
+tmpG <- eBayes(tmpG) 
+
+res <- list()
+res[['C1_vs_C2']] <- topTable(tmpG, sort.by = "P", n = Inf,coef='A')
+res[['C1_vs_NoLesion+NormalAppear']] <- topTable(tmpG, sort.by = "P", n = Inf,coef='B')
+res[['C2_vs_NoLesion+NormalAppear']] <- topTable(tmpG, sort.by = "P", n = Inf,coef='C')
+
+res[['C1_vs_C2']]$comp='C1_vs_C2'
+res[['C1_vs_NoLesion+NormalAppear']]$comp='C1_vs_NoLesion+NormalAppear'
+res[['C2_vs_NoLesion+NormalAppear']]$comp='C2_vs_NoLesion+NormalAppear'
+res=do.call(rbind,res)
+res$sign = 'NS'
+res[which(res$adj.P.Val<0.01&res$logFC>0.5),'sign']='UP'
+res[which(res$adj.P.Val<0.01&res$logFC<(-0.5)),'sign']='DN'
+res$gene_name=ref_G[gsub(".+\\.","",rownames(res)),3]
+
+ggplot(res,aes(logFC,-log10(P.Value),col=sign))+geom_point()+facet_grid(~comp)+theme_bw()+scale_color_manual(values=sign_cols)
+
+```
+
+```{r  echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE, fig.width = 5, fig.height = 3}
+plot_gene_tissue<-function(gene) {
+  id = rownames(ref_G[which(ref_G[,3]==gene),])
+  datap = meta 
+  meta$gene = BDCorrBS[id, rownames(meta)]
+  ggplot(meta,aes(condition,gene))+geom_boxplot(outlier.shape=NA)+facet_grid(~tissue,space='free_x',scales='free_x')+theme_bw()+theme(axis.text.x=element_text(angle=60,hjust=1))+geom_point(aes(col=subtype),position=position_jitter(width=.1))+ggtitle(gene)
+}
+plot_gene_tissue('IGHG2')
+plot_gene_tissue('GBP1')
+plot_gene_tissue('VCAM1')
+plot_gene_tissue('MCAM')
+plot_gene_tissue('CD3E')
+plot_gene_tissue('VCAM1')
+plot_gene_tissue('PLP1')
+plot_gene_tissue('CNP')
+plot_gene_tissue('IRF1')
+```
+
+
+```{r  echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE, fig.width = 5, fig.height = 3}
+noLesions=subset(meta,condition=='Normal'|condition=='Normal_Appearing')
+autoplot(prcomp(t(BDCorrBS[,rownames(noLesions)])),data=noLesions,col='condition')+theme_bw()
+```
+
+
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, paged.print=TRUE, fig.width = 6, fig.height = 4}
+noLesions$cd3e = BDCorrBS['ENSG00000198851', rownames(noLesions)]
+noLesions$vcam1 = BDCorrBS['ENSG00000162692', rownames(noLesions)]
+noLesions$icam1 = BDCorrBS['ENSG00000090339', rownames(noLesions)]
+noLesions$mcam = BDCorrBS['ENSG00000076706', rownames(noLesions)] 
+noLesions$ighg2 = BDCorrBS['ENSG00000211893', rownames(noLesions)]
+noLesions$ms4a1 = BDCorrBS['ENSG00000156738', rownames(noLesions)]
+noLesions$itga8 = BDCorrBS['ENSG00000077943', rownames(noLesions)]
+noLesions$irf1 = BDCorrBS['ENSG00000125347', rownames(noLesions)] 
+noLesions$cd24 = BDCorrBS['ENSG00000272398', rownames(noLesions)] 
+noLesions$ccl4 = BDCorrBS['ENSG00000275302', rownames(noLesions)] 
+
+a1=autoplot(prcomp(t(BDCorrBS[,rownames(noLesions)])),data=noLesions,fill='vcam1',shape=21)+scale_fill_gradientn(colors=rev(brewer.pal(11,'RdYlBu')))+theme_bw()
+a2=autoplot(prcomp(t(BDCorrBS[,rownames(noLesions)])),data=noLesions,fill='icam1',shape=21)+scale_fill_gradientn(colors=rev(brewer.pal(11,'RdYlBu')))+theme_bw()
+a3=autoplot(prcomp(t(BDCorrBS[,rownames(noLesions)])),data=noLesions,fill='mcam',shape=21)+scale_fill_gradientn(colors=rev(brewer.pal(11,'RdYlBu')))+theme_bw()
+a4=autoplot(prcomp(t(BDCorrBS[,rownames(noLesions)])),data=noLesions,fill='cd3e',shape=21)+scale_fill_gradientn(colors=rev(brewer.pal(11,'RdYlBu')))+theme_bw()
+a5=autoplot(prcomp(t(BDCorrBS[,rownames(noLesions)])),data=noLesions,fill='ighg2',shape=21)+scale_fill_gradientn(colors=rev(brewer.pal(11,'RdYlBu')))+theme_bw()
+a6=autoplot(prcomp(t(BDCorrBS[,rownames(noLesions)])),data=noLesions,fill='ms4a1',shape=21)+scale_fill_gradientn(colors=rev(brewer.pal(11,'RdYlBu')))+theme_bw()
+a7=autoplot(prcomp(t(BDCorrBS[,rownames(noLesions)])),data=noLesions,fill='itga8',shape=21)+scale_fill_gradientn(colors=rev(brewer.pal(11,'RdYlBu')))+theme_bw()
+a8=autoplot(prcomp(t(BDCorrBS[,rownames(noLesions)])),data=noLesions,fill='irf1',shape=21)+scale_fill_gradientn(colors=rev(brewer.pal(11,'RdYlBu')))+theme_bw()
+#a9=autoplot(prcomp(t(BDCorrBS[,rownames(noLesions)])),data=noLesions,fill='cd24',shape=21)+scale_fill_gradientn(colors=rev(brewer.pal(11,'RdYlBu')))+theme_bw()
+a9=autoplot(prcomp(t(BDCorrBS[,rownames(noLesions)])),data=noLesions,fill='ccl4',shape=21)+scale_fill_gradientn(colors=rev(brewer.pal(11,'RdYlBu')))+theme_bw()
+
+cowplot::plot_grid(a1,a2,a3,a4,a5,a6,a7,a8,a9,ncol=3)
+
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, paged.print=TRUE, fig.width = 5, fig.height = 3}
+hc=hclust(dist(t(BDCorrBS[,rownames(noLesions)])))
+subtypeLesion=data.frame(cutree(hc, k=2))
+subtypeLesion[,1]=paste0('C',subtypeLesion[,1])
+colnames(subtypeLesion)='subtypeLesion'
+
+plot(hc)
+autoplot(prcomp(t(BDCorrBS[,rownames(noLesions)])),data=subtypeLesion,col='subtypeLesion')+theme_bw()
+```
+
+```{r  echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE, fig.width = 6, fig.height = 3}
+summarize_col<-function(col){
+  t=table(noLesions[,c('sample_type' ,col)])
+  for(i in 1:ncol(t)){t[,i]=t[,i]/sum(t[,i])}
+  for(i in 1:nrow(t)){t[i,]=t[i,]/sum(t[i,])}
+  t=data.frame(t)
+  p=ggplot(t,aes(sample_type,Freq,fill=t[,col]))+geom_col(col='white')+labs(fill=col)+theme_bw()
+  return(p)
+
+}
+
+noLesions$sample_type=subtypeLesion[rownames(noLesions),1]
+noLesions$lesion_type=factor(noLesions$lesion_type,levels = c('NAGM','NAWM','GM','PVM','WM'))
+
+p1=summarize_col('sample')
+p2=summarize_col('sex')+scale_fill_manual(values=c('deeppink','deepskyblue'))
+p3=summarize_col('batch')+scale_fill_manual(values=c('grey30','grey60','grey90'))
+p4=summarize_col('disease')+scale_fill_manual(values=c('brown1','darkolivegreen1','darkorange'))
+p5=summarize_col('lesion_type')
+p6=summarize_col('tissue')
+
+cowplot::plot_grid(p1,p2,p3,p4,p5,p6,ncol=3)
+
+```
+
+```{r  echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE, fig.width = 6, fig.height = 3}
+mmG <- model.matrix(~ 0 + sample_type+batch, data=noLesions)
+
+# Filtering low expressed genes
+yG <- voom(d[,rownames(noLesions)], mmG, plot = F)
+
+fitG <- lmFit(yG, mmG)
+contrG <- makeContrasts(
+  A = sample_typeC1 - sample_typeC2,
+  levels = colnames(coef(fitG)))
+tmpG <- contrasts.fit(fitG, contrG)
+tmpG <- eBayes(tmpG) 
+
+resN <- list()
+resN[['C1_vs_C2']] <- topTable(tmpG, sort.by = "P", n = Inf,coef='A')
+
+resN[['C1_vs_C2']]$comp='C1_vs_C2'
+resN=do.call(rbind,resN)
+resN$sign = 'NS'
+resN[which(resN$adj.P.Val<0.01&resN$logFC>0.5),'sign']='UP'
+resN[which(resN$adj.P.Val<0.01&resN$logFC<(-0.5)),'sign']='DN'
+resN$gene_name=ref_G[gsub(".+\\.","",rownames(resN)),3]
+
+ggplot(resN,aes(logFC,-log10(P.Value),col=sign))+geom_point()+facet_grid(~comp)+theme_bw()+scale_color_manual(values=sign_cols)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

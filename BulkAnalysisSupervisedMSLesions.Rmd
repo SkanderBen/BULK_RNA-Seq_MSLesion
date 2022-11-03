@@ -1,6 +1,7 @@
 ---
 title: "Bulk analysis of MS lesions(Supervised)"
 output: github_document
+always_allow_html: yes
 ---
 
 This is an analysis performed on the bulk RNA-Seq dataset
@@ -16,7 +17,7 @@ library(edgeR)
 library(fgsea)
 library(qusage)
 library(DESeq2)
-library(org.Hs.eg.db)
+library(org.Hs.eg.db) 
 library(ggplot2)
 library(enrichR)
 library(VennDiagram)
